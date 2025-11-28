@@ -1,23 +1,23 @@
 {
   "network": "sepolia",
-  "verifier": {
-    "address": "0x79acb201970c4aa972a776fcfb102ddefd45f37594fa7beac765ce995742f37",
-    "classHash": "0x5d55cf48f3495593a714e530eee59fceb70f6e137e8c10a1348bf900627f264"
+  "depositVerifier": {
+    "address": "0x039fbb068b510e5528eeea74a51c5ffa6e7c8278acddcf3f6ad628bd9d16c0d5"
   },
-  "mainContract": {
-    "address": "0x1f338f241e8f98d470b7747a30f7561459833a1b58a37fb728fa90ed5b13500",
-    "classHash": "0x101611c0e9b4a082380e6f978437ff0be90f10e505e85a5a9fa8b9b40be37f2"
+  "unlockVerifier": {
+    "address": "0x073c17d3a030b3b56ca30fca476db0c13a2f3ba1b187e2754482b7b8dd2d6bcb"
+  },
+  "spSTRK": {
+    "address": "0x05efc624f4f0afb75bd6a57b35a0d2fb270c6eb0cea0e3f7dc36aefe9681e509"
   },
   "config": {
     "owner": "0x073eb5658ce8291f795aad5584000dfc52aa197600b4df98568b4d480b9fdb65",
     "strkToken": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
-    "validatorPool": "0x0",
-    "withdrawalNft": "0x0",
+    "validatorPool": "0x055ec7c532c90a5452e40f4b20b90b6756e218d582d4ee7bc19b8ac8b5cbd78f",
     "daoFeeBps": "500",
     "devFeeBps": "300",
     "minStakeAmount": "100000000000000000",
     "unlockPeriod": "691200",
     "claimWindow": "86400"
   },
-  "deployedAt": "2025-11-17T02:51:59.994Z"
+  "deployedAt": "2025-11-26"
 }
