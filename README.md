@@ -285,8 +285,9 @@ MIT License - see [LICENSE](LICENSE) for details
 - **Garaga Team** - Starknet verifier tooling (working on fixes)
 - **Starknet Foundation** - Infrastructure and support
 
----
-
-**Built with by Sparrow Finance**
+## Built with by Sparrow Finance
 
 
+**Merkle-tree** - membership proofs would strengthen anonymity, but we intentionally skipped them for the hackathon to keep the system fully client-side and avoid running a centralized backend/subgraph service that would track users’ leaves. We currently rely on per-commitment proofs (ownership + nullifier) which already deliver wallet unlinkability.
+
+**Zcash Bridge Offers Anonymity through initial deposit of funds** - users can use the zcash bridge to mint strk on strknet for gas to perform the deposit/withdrawal process

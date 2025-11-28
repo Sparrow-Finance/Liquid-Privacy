@@ -7,7 +7,8 @@
     "address": "0x073c17d3a030b3b56ca30fca476db0c13a2f3ba1b187e2754482b7b8dd2d6bcb"
   },
   "spSTRK": {
-    "address": "0x05efc624f4f0afb75bd6a57b35a0d2fb270c6eb0cea0e3f7dc36aefe9681e509"
+    "address": "0x05efc624f4f0afb75bd6a57b35a0d2fb270c6eb0cea0e3f7dc36aefe9681e509",
+    "class_hash": "0x073552fe86dd77601ce0815c32125945d7c093629c3f83d16e63fceb89472510"
   },
   "config": {
     "owner": "0x073eb5658ce8291f795aad5584000dfc52aa197600b4df98568b4d480b9fdb65",

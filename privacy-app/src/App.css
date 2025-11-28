@@ -114,6 +114,19 @@ h1 {
   margin-top: 1rem;
 }
 
+.withdraw-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  width: 100%;
+  justify-content: center;
+}
+
+.withdraw-options button {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
 .input-group {
   display: flex;
   flex-direction: row;
