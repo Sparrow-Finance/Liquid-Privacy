@@ -1,0 +1,23 @@
+{
+  "network": "sepolia",
+  "verifier": {
+    "address": "0x79acb201970c4aa972a776fcfb102ddefd45f37594fa7beac765ce995742f37",
+    "classHash": "0x5d55cf48f3495593a714e530eee59fceb70f6e137e8c10a1348bf900627f264"
+  },
+  "mainContract": {
+    "address": "0x1f338f241e8f98d470b7747a30f7561459833a1b58a37fb728fa90ed5b13500",
+    "classHash": "0x101611c0e9b4a082380e6f978437ff0be90f10e505e85a5a9fa8b9b40be37f2"
+  },
+  "config": {
+    "owner": "0x073eb5658ce8291f795aad5584000dfc52aa197600b4df98568b4d480b9fdb65",
+    "strkToken": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+    "validatorPool": "0x0",
+    "withdrawalNft": "0x0",
+    "daoFeeBps": "500",
+    "devFeeBps": "300",
+    "minStakeAmount": "100000000000000000",
+    "unlockPeriod": "691200",
+    "claimWindow": "86400"
+  },
+  "deployedAt": "2025-11-17T02:51:59.994Z"
+}
