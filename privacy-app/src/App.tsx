@@ -8,7 +8,7 @@ import { flattenFieldsAsArray } from "./helpers/proof";
 import { getHonkCallData, init } from 'garaga';
 import { bytecode, abi } from "./assets/circuit.json";
 import { bytecode as unlockBytecode, abi as unlockAbi } from "../../circuits/private_unlocks/target/private_unlocks.json";
-import vkUrl from './assets/vk.bin?url';
+import depositVkUrl from './assets/deposit_vk.bin?url';
 import unlockVkUrl from './assets/unlock_vk.bin?url';
 import { RpcProvider, Contract } from 'starknet';
 import { abi as verifierAbi } from "./assets/verifier.json";
@@ -153,7 +153,7 @@ function App() {
     };
 
     const loadVk = async () => {
-      const response = await fetch(vkUrl);
+      const response = await fetch(depositVkUrl);
       const arrayBuffer = await response.arrayBuffer();
       const binaryData = new Uint8Array(arrayBuffer);
       setVk(binaryData);
