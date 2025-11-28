@@ -1,6 +1,0 @@
-commitment = "123"
-assets = "456"
-
-[witness]
-secret = "123"
-amount = "456"
