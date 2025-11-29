@@ -1,4 +1,3 @@
-// Simple commitment calculator - outputs the hash without constraints
 use poseidon::poseidon::bn254::hash_2;
 
 fn main(

@@ -1,5 +1,7 @@
 use poseidon::poseidon::bn254::hash_2;
 
+global TREE_HEIGHT: u32 = 32;
+
 // Simplified private unlock circuit
 // Matches deposit structure - contract handles time locks
 // Circuit proves: ownership + nullifier
@@ -13,34 +15,47 @@ struct NoteWitness {
 }
 
 fn hash_commitment(w: NoteWitness) -> Field {
-    // Same structure as deposit circuit
-    // hash(secret, shares) -> hash(h1, deposit_time) -> hash(h2, blinding)
     let h1 = hash_2([w.secret, w.shares]);
     let h2 = hash_2([h1, w.deposit_time]);
     hash_2([h2, w.blinding])
 }
 
 fn hash_nullifier(w: NoteWitness) -> Field {
-    // Nullifier = hash(secret, blinding) - unique per commitment
     hash_2([w.secret, w.blinding])
 }
 
-// Main function: prove ownership and compute nullifier
 fn main(
+    // Private witness - never revealed
     witness: NoteWitness,
-    commitment: pub Field,
+    leaf_index: u32,
+    siblings: [Field; TREE_HEIGHT],
+    // Public inputs - only these are visible on-chain
     nullifier: pub Field,
     shares: pub Field,
+    root: pub Field,
 ) {
-    // 1. Verify commitment matches
-    let computed_commitment = hash_commitment(witness);
-    assert(computed_commitment == commitment);
-    
-    // 2. Verify nullifier is correct
+    // 1. Compute commitment PRIVATELY (not revealed!)
+    let commitment = hash_commitment(witness);
+
+    // 2. Verify nullifier matches witness
     let computed_nullifier = hash_nullifier(witness);
     assert(computed_nullifier == nullifier);
-    
-    // 3. Verify shares match
+
+    // 3. Verify shares
     assert(witness.shares == shares);
     assert(shares != 0);
+
+    // 4. Merkle membership proof - proves commitment is in tree WITHOUT revealing it
+    let mut current = commitment;
+    let mut index: u32 = leaf_index;
+
+    for sibling in siblings {
+        let is_right = index & 1;
+        let left = if is_right == 0 { current } else { sibling };
+        let right = if is_right == 0 { sibling } else { current };
+        current = hash_2([left, right]);
+        index = index >> 1;
+    }
+
+    assert(current == root);
 }

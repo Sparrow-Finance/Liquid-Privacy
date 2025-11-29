@@ -10,7 +10,7 @@ import { bytecode, abi } from "./assets/circuit.json";
 import { bytecode as unlockBytecode, abi as unlockAbi } from "../../circuits/private_unlocks/target/private_unlocks.json";
 import depositVkUrl from './assets/deposit_vk.bin?url';
 import unlockVkUrl from './assets/unlock_vk.bin?url';
-import { RpcProvider, Contract } from 'starknet';
+import { RpcProvider, Contract, hash as starknetHash } from 'starknet';
 import { abi as verifierAbi } from "./assets/verifier.json";
 import { connect } from '@starknet-io/get-starknet';
 import initNoirC from "@noir-lang/noirc_abi";
@@ -24,6 +24,9 @@ import { buildPoseidon } from 'circomlibjs';
 const SPSTRK_ADDRESS = '0x05efc624f4f0afb75bd6a57b35a0d2fb270c6eb0cea0e3f7dc36aefe9681e509';
 const DEPOSIT_VERIFIER_ADDRESS = '0x039fbb068b510e5528eeea74a51c5ffa6e7c8278acddcf3f6ad628bd9d16c0d5';
 const STRK_TOKEN_ADDRESS = '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d'; // Sepolia STRK
+
+// Merkle indexer URL (for fetching Merkle paths for unlock proofs)
+const INDEXER_URL = 'http://65.108.206.214:4000'; // TODO: Update to your server IP
 
 // Minimal ABI for spSTRK contract
 const spStrkAbi = [
@@ -51,7 +54,7 @@ const spStrkAbi = [
     "type": "function",
     "inputs": [
       { "name": "proof", "type": "core::array::Span::<core::felt252>" },
-      { "name": "commitment", "type": "core::integer::u256" },
+      { "name": "nullifier", "type": "core::integer::u256" },
       { "name": "recipient", "type": "core::starknet::contract_address::ContractAddress" }
     ],
     "outputs": [],
@@ -62,7 +65,7 @@ const spStrkAbi = [
     "type": "function",
     "inputs": [
       { "name": "proof", "type": "core::array::Span::<core::felt252>" },
-      { "name": "commitment", "type": "core::integer::u256" }
+      { "name": "nullifier_hash", "type": "core::integer::u256" }
     ],
     "outputs": [],
     "state_mutability": "external"
@@ -72,10 +75,18 @@ const spStrkAbi = [
     "type": "function",
     "inputs": [
       { "name": "proof", "type": "core::array::Span::<core::felt252>" },
-      { "name": "commitment", "type": "core::integer::u256" },
       { "name": "nullifier", "type": "core::integer::u256" },
-      { "name": "recipient", "type": "core::starknet::contract_address::ContractAddress" },
-      { "name": "shares", "type": "core::integer::u256" }
+      { "name": "recipient", "type": "core::starknet::contract_address::ContractAddress" }
+    ],
+    "outputs": [],
+    "state_mutability": "external"
+  },
+  {
+    "name": "private_deposit",
+    "type": "function",
+    "inputs": [
+      { "name": "amount", "type": "core::integer::u256" },
+      { "name": "commitment", "type": "core::integer::u256" }
     ],
     "outputs": [],
     "state_mutability": "external"
@@ -111,6 +122,9 @@ function App() {
   const [depositStep, setDepositStep] = useState<number>(0);
   const [intentMarked, setIntentMarked] = useState<boolean>(false);
   
+  // Deposit mode: 'single' (secure) or 'two-step' (experimental privacy)
+  const [depositMode, setDepositMode] = useState<'single' | 'two-step'>('single');
+  
   // Private inputs (witness)
   const [secret, setSecret] = useState<string>('');
   const [amount, setAmount] = useState<string>('1000000000000000000'); // 1 STRK default
@@ -134,7 +148,6 @@ function App() {
   const [withdrawSecret, setWithdrawSecret] = useState<string>('');
   const [withdrawShares, setWithdrawShares] = useState<string>('');
   const [withdrawBlinding, setWithdrawBlinding] = useState<string>('');
-  const [withdrawNoteIndex, setWithdrawNoteIndex] = useState<string>('0');
   const [withdrawRecipient, setWithdrawRecipient] = useState<string>('');
 
   // Initialize WASM on component mount
@@ -272,7 +285,7 @@ function App() {
       console.log('Computed commitment:', commitmentStr);
       setCommitment(commitmentStr);
       
-      alert(`Commitment computed!\n\n${commitmentStr}\n\nNow you can proceed with Step 2.`);
+      alert(`Commitment computed!\n\n⚠️ SAVE YOUR NOTE before depositing!\n\nNow click "Private Deposit" to complete.`);
       
     } catch (error) {
       console.error('Error computing commitment:', error);
@@ -284,6 +297,16 @@ function App() {
   const generateNote = (): string => {
     const time = depositTime || Math.floor(Date.now() / 1000).toString();
     return `sparrow:${amount}:${secret}:${blinding}:${time}:${shares}:${commitment}`;
+  };
+
+  // Fetch Merkle path from indexer for unlock proofs
+  const fetchMerklePath = async (commitment: string): Promise<{leaf_index: number, siblings: string[], root: string}> => {
+    const response = await fetch(`${INDEXER_URL}/path/commitment/${commitment}`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+      throw new Error(`Failed to fetch Merkle path: ${error.error || response.statusText}`);
+    }
+    return response.json();
   };
 
   // Parse note string
@@ -381,7 +404,64 @@ function App() {
     }
   };
 
-  // Step 2: Generate proof and create private commitment
+  // Single-step private deposit (RECOMMENDED - no front-running risk)
+  const privateDeposit = async () => {
+    if (!wallet) {
+      alert('Please connect wallet first');
+      return;
+    }
+    if (!secret || !blinding) {
+      alert('Please generate secret and blinding first');
+      return;
+    }
+    if (!commitment) {
+      alert('Please compute commitment first');
+      return;
+    }
+    
+    try {
+      updateState(ProofState.ConnectingWallet);
+      
+      const strkToken = new Contract({ abi: erc20Abi, address: STRK_TOKEN_ADDRESS, providerOrAccount: wallet.account });
+      const spStrkContract = new Contract({ abi: spStrkAbi, address: SPSTRK_ADDRESS, providerOrAccount: wallet.account });
+      
+      // Helper to split BigInt into u256 (low, high)
+      const toU256 = (value: string) => {
+        const bigVal = BigInt(value);
+        const low = bigVal % (2n ** 128n);
+        const high = bigVal / (2n ** 128n);
+        return { low: low.toString(), high: high.toString() };
+      };
+      
+      // Approve STRK spend
+      updateState(ProofState.SendingTransaction);
+      console.log('Approving STRK spend...');
+      const approveTx = await strkToken.approve(SPSTRK_ADDRESS, toU256(amount));
+      await wallet.account.waitForTransaction(approveTx.transaction_hash);
+      console.log('Approval confirmed');
+      
+      // Single-step deposit (no proof needed!)
+      console.log('Calling private_deposit...');
+      console.log('Amount:', toU256(amount));
+      console.log('Commitment:', toU256(commitment));
+      
+      const depositTx = await spStrkContract.private_deposit(
+        toU256(amount),
+        toU256(commitment)
+      );
+      await wallet.account.waitForTransaction(depositTx.transaction_hash);
+      console.log('Private deposit complete!');
+      
+      setDepositStep(2);
+      updateState(ProofState.ProofVerified);
+      
+      alert('Success! Private deposit complete.\n\n⚠️ SAVE YOUR NOTE - You need it to withdraw!\n\nClick "Copy Note" or "Download Note" now.');
+    } catch (error) {
+      handleError(error);
+    }
+  };
+
+  // Step 2: Generate proof and create private commitment (LEGACY - two-step flow)
   const createPrivateCommitment = async () => {
     if (!wallet) {
       alert('Please connect wallet first');
@@ -452,6 +532,17 @@ function App() {
         const high = bigVal / (2n ** 128n);
         return { low: low.toString(), high: high.toString() };
       };
+      
+      // Test verifier directly before calling contract
+      console.log('Testing verifier directly...');
+      const testProvider = new RpcProvider({ nodeUrl: 'https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/LOIuv6FM2_iaC8ZCb1Omu' });
+      const testVerifier = new Contract({ abi: verifierAbi, address: DEPOSIT_VERIFIER_ADDRESS, providerOrAccount: testProvider });
+      try {
+        const testResult = await testVerifier.verify_ultra_starknet_honk_proof(proofData);
+        console.log('Verifier result:', testResult);
+      } catch (e) {
+        console.log('Verifier error:', e);
+      }
       
       console.log('Calling create_private_commitment...');
       console.log('Commitment u256:', toU256(commitment));
@@ -548,6 +639,13 @@ function App() {
       const poseidon = await buildPoseidon();
       const F = poseidon.F;
 
+      // Debug: log all note components
+      console.log('=== CLAIM spSTRK NOTE DEBUG ===');
+      console.log('withdrawSecret:', withdrawSecret);
+      console.log('withdrawShares:', withdrawShares);
+      console.log('depositTime:', depositTime);
+      console.log('withdrawBlinding:', withdrawBlinding);
+
       // Compute commitment from note data (same as deposit)
       const h1 = poseidon([BigInt(withdrawSecret), BigInt(withdrawShares)]);
       const h2 = poseidon([h1, BigInt(depositTime)]);
@@ -556,10 +654,21 @@ function App() {
       // Compute nullifier = hash(secret, blinding)
       const nullifier = poseidon([BigInt(withdrawSecret), BigInt(withdrawBlinding)]);
 
-      console.log('Computed commitment:', F.toString(computedCommitment));
-      console.log('Computed nullifier:', F.toString(nullifier));
+      const commitmentStr = F.toString(computedCommitment);
+      const nullifierStr = F.toString(nullifier);
+      
+      console.log('h1 (hash of secret,shares):', F.toString(h1));
+      console.log('h2 (hash of h1,time):', F.toString(h2));
+      console.log('Computed commitment:', commitmentStr);
+      console.log('Computed nullifier:', nullifierStr);
 
-      // Generate proof using UNLOCK circuit
+      // Fetch Merkle path from indexer
+      console.log('Fetching Merkle path from indexer...');
+      const merklePath = await fetchMerklePath(commitmentStr);
+      console.log('Merkle path:', merklePath);
+
+      // Generate proof using UNLOCK circuit with Merkle proof
+      // NEW: commitment is computed privately inside circuit
       const input = {
         witness: {
           secret: withdrawSecret,
@@ -567,9 +676,12 @@ function App() {
           deposit_time: depositTime,
           blinding: withdrawBlinding
         },
-        commitment: F.toString(computedCommitment),
-        nullifier: F.toString(nullifier),
-        shares: withdrawShares
+        leaf_index: merklePath.leaf_index,
+        siblings: merklePath.siblings,
+        // Public inputs only
+        nullifier: nullifierStr,
+        shares: withdrawShares,
+        root: merklePath.root
       };
 
       console.log('Unlock circuit input:', input);
@@ -589,7 +701,6 @@ function App() {
       console.log('Proof public inputs:', proof.publicInputs);
       const flatInputs = flattenFieldsAsArray(proof.publicInputs);
       console.log('Flattened public inputs:', flatInputs);
-      console.log('Shares in proof (index 2):', flatInputs[2]);
       
       const callData = getHonkCallData(
         proof.proof,
@@ -611,10 +722,11 @@ function App() {
       };
 
       const recipient = withdrawRecipient || walletAddress;
+      // TRUE PRIVACY: Only nullifier is passed, commitment stays hidden!
       console.log('Calling claim_spSTRK to:', recipient);
       const tx = await spStrkContract.claim_spSTRK(
         proofData,
-        toU256(F.toString(computedCommitment)),
+        toU256(nullifierStr),
         recipient
       );
       await wallet.account.waitForTransaction(tx.transaction_hash);
@@ -641,17 +753,43 @@ function App() {
       const poseidon = await buildPoseidon();
       const F = poseidon.F;
 
-      // Compute commitment from note data
+      // Compute commitment from note data (used for Merkle path lookup)
       const h1 = poseidon([BigInt(withdrawSecret), BigInt(withdrawShares)]);
       const h2 = poseidon([h1, BigInt(depositTime)]);
       const computedCommitment = poseidon([h2, BigInt(withdrawBlinding)]);
 
-      // Compute nullifier
+      // Compute nullifier and nullifier_hash
       const nullifier = poseidon([BigInt(withdrawSecret), BigInt(withdrawBlinding)]);
+      const nullifierBigInt = BigInt(F.toString(nullifier));
+      
+      // nullifier_hash uses STARKNET Pedersen (not Poseidon!)
+      // Contract computes: pedersen(nullifier.low, nullifier.high)
+      const nullifierLow = nullifierBigInt & ((1n << 128n) - 1n);
+      const nullifierHigh = nullifierBigInt >> 128n;
+      console.log('=== NULLIFIER HASH DEBUG ===');
+      console.log('nullifierBigInt:', nullifierBigInt.toString());
+      console.log('nullifierLow:', nullifierLow.toString());
+      console.log('nullifierHigh:', nullifierHigh.toString());
+      const nullifierHashFelt = starknetHash.computePedersenHash(nullifierLow.toString(), nullifierHigh.toString());
+      console.log('nullifierHashFelt:', nullifierHashFelt);
 
-      console.log('Request unlock - Commitment:', F.toString(computedCommitment));
+      const commitmentStr = F.toString(computedCommitment);
+      const nullifierStr = F.toString(nullifier);
+      const nullifierHashStr = nullifierHashFelt;
+      
+      console.log('Request unlock - Nullifier hash:', nullifierHashStr);
+      console.log('Frontend computed commitment:', commitmentStr);
 
-      // Generate proof using UNLOCK circuit
+      // Fetch Merkle path from indexer
+      console.log('Fetching Merkle path from indexer...');
+      const merklePath = await fetchMerklePath(commitmentStr);
+      console.log('Merkle path:', merklePath);
+      console.log('Siblings length:', merklePath.siblings?.length);
+      console.log('First 3 siblings:', merklePath.siblings?.slice(0, 3));
+      console.log('Root from indexer:', merklePath.root);
+
+      // Generate proof using UNLOCK circuit with Merkle proof
+      // NEW: commitment is computed privately inside circuit
       const input = {
         witness: {
           secret: withdrawSecret,
@@ -659,10 +797,23 @@ function App() {
           deposit_time: depositTime,
           blinding: withdrawBlinding
         },
-        commitment: F.toString(computedCommitment),
-        nullifier: F.toString(nullifier),
-        shares: withdrawShares
+        leaf_index: merklePath.leaf_index,
+        siblings: merklePath.siblings,
+        // Public inputs only
+        nullifier: nullifierStr,
+        shares: withdrawShares,
+        root: merklePath.root
       };
+
+      // DEBUG: Log exact circuit inputs
+      console.log('=== CIRCUIT PUBLIC INPUTS ===');
+      console.log('nullifier:', nullifierStr);
+      console.log('shares:', withdrawShares);
+      console.log('root:', merklePath.root);
+      console.log('leaf_index:', merklePath.leaf_index);
+      console.log('witness.secret:', withdrawSecret);
+      console.log('witness.blinding:', withdrawBlinding);
+      console.log('witness.deposit_time:', depositTime);
 
       updateState(ProofState.GeneratingProof);
       let noir = new Noir({ bytecode: unlockBytecode, abi: unlockAbi as any, debug_symbols: '', file_map: {} as DebugFileMap });
@@ -675,18 +826,58 @@ function App() {
       
       await init();
       
+      // DEBUG: Log proof outputs
+      console.log('=== PROOF PUBLIC INPUTS ===');
+      console.log('proof.publicInputs:', proof.publicInputs);
+      console.log('proof.publicInputs length:', proof.publicInputs.length);
+      // Log each public input value
+      proof.publicInputs.forEach((pi: any, i: number) => {
+        console.log(`  publicInput[${i}]:`, pi, typeof pi);
+      });
+      
       const flatInputs = flattenFieldsAsArray(proof.publicInputs);
+      console.log('flatInputs:', flatInputs);
+      console.log('flatInputs length:', flatInputs.length);
+      
+      // Compare expected vs actual public inputs
+      console.log('=== COMPARISON ===');
+      console.log('Expected nullifier:', nullifierStr);
+      console.log('Expected shares:', withdrawShares);
+      console.log('Expected root:', merklePath.root);
+      
       const callData = getHonkCallData(
         proof.proof,
         flatInputs,
         unlockVk as Uint8Array,
         1
       );
+      
+      console.log('callData length:', callData.length);
+      console.log('VK size:', (unlockVk as Uint8Array).length);
+      console.log('callData[0] (length prefix):', callData[0]);
+
+      const proofData = callData.slice(1).map(n => '0x' + n.toString(16));
+      console.log('proofData length after slice:', proofData.length);
+      
+      // Test unlock verifier directly before calling contract
+      console.log('=== TESTING UNLOCK VERIFIER DIRECTLY ===');
+      const testProvider = new RpcProvider({ nodeUrl: 'https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_8/LOIuv6FM2_iaC8ZCb1Omu' });
+      const UNLOCK_VERIFIER_ADDRESS = '0x077aacdfef0ed6fb5d6a48894afe1d0a3bb5bbc41026c47276c3964c32622f7b';
+      const testVerifier = new Contract({ 
+        abi: [{ type: 'function', name: 'verify_ultra_starknet_honk_proof', inputs: [{ name: 'full_proof_with_hints', type: 'core::array::Span::<core::felt252>' }], outputs: [{ type: 'core::option::Option::<core::array::Span::<core::integer::u256>>' }], state_mutability: 'view' }],
+        address: UNLOCK_VERIFIER_ADDRESS, 
+        providerOrAccount: testProvider 
+      });
+      try {
+        const testResult = await testVerifier.verify_ultra_starknet_honk_proof(proofData);
+        console.log('Verifier result:', testResult);
+      } catch (e) {
+        console.log('Verifier direct test error:', e);
+      }
 
       updateState(ProofState.SendingTransaction);
       const spStrkContract = new Contract({ abi: spStrkAbi, address: SPSTRK_ADDRESS, providerOrAccount: wallet.account });
 
-      const proofData = callData.slice(1).map(n => '0x' + n.toString(16));
       const toU256 = (value: string) => {
         const bigVal = BigInt(value);
         const low = bigVal % (2n ** 128n);
@@ -694,10 +885,11 @@ function App() {
         return { low: low.toString(), high: high.toString() };
       };
 
-      console.log('Calling request_private_unlock...');
+      // TRUE PRIVACY: Only nullifier_hash is passed (not commitment or nullifier)
+      console.log('Calling request_private_unlock with nullifier_hash:', nullifierHashStr);
       const tx = await spStrkContract.request_private_unlock(
         proofData,
-        toU256(F.toString(computedCommitment))
+        toU256(nullifierHashStr)
       );
       await wallet.account.waitForTransaction(tx.transaction_hash);
 
@@ -729,10 +921,19 @@ function App() {
       const computedCommitment = poseidon([h2, BigInt(withdrawBlinding)]);
       const nullifier = poseidon([BigInt(withdrawSecret), BigInt(withdrawBlinding)]);
 
-      console.log('Complete withdraw - Commitment:', F.toString(computedCommitment));
-      console.log('Complete withdraw - Nullifier:', F.toString(nullifier));
+      const commitmentStr = F.toString(computedCommitment);
+      const nullifierStr = F.toString(nullifier);
 
-      // Generate proof using UNLOCK circuit
+      console.log('Complete withdraw - Commitment:', commitmentStr);
+      console.log('Complete withdraw - Nullifier:', nullifierStr);
+
+      // Fetch Merkle path from indexer
+      console.log('Fetching Merkle path from indexer...');
+      const merklePath = await fetchMerklePath(commitmentStr);
+      console.log('Merkle path:', merklePath);
+
+      // Generate proof using UNLOCK circuit with Merkle proof
+      // NEW: commitment is computed privately inside circuit, not passed as public input
       const input = {
         witness: {
           secret: withdrawSecret,
@@ -740,9 +941,12 @@ function App() {
           deposit_time: depositTime,
           blinding: withdrawBlinding
         },
-        commitment: F.toString(computedCommitment),
-        nullifier: F.toString(nullifier),
-        shares: withdrawShares
+        leaf_index: merklePath.leaf_index,
+        siblings: merklePath.siblings,
+        // Public inputs (only these are visible on-chain)
+        nullifier: nullifierStr,
+        shares: withdrawShares,
+        root: merklePath.root
       };
 
       updateState(ProofState.GeneratingProof);
@@ -776,15 +980,14 @@ function App() {
       };
 
       const recipient = withdrawRecipient || walletAddress;
-      const nullifierU256 = toU256(F.toString(nullifier));
+      const nullifierU256 = toU256(nullifierStr);
 
+      // TRUE PRIVACY: Only nullifier is passed, commitment stays hidden!
       console.log('Calling complete_private_withdraw to:', recipient);
       const tx = await spStrkContract.complete_private_withdraw(
         proofData,
-        toU256(F.toString(computedCommitment)),
         nullifierU256,
-        recipient,
-        toU256(withdrawShares)
+        recipient
       );
       await wallet.account.waitForTransaction(tx.transaction_hash);
 
@@ -852,7 +1055,46 @@ function App() {
       
       <div className="state-machine">
         <div className="input-section">
-          <h3>Private Deposit - Step {depositStep === 0 ? '1' : depositStep === 1 ? '2' : '✓'}</h3>
+          <h3>Private Deposit {depositStep === 2 ? '✓ Complete' : ''}</h3>
+          
+          {/* Deposit Mode Toggle */}
+          {!withdrawMode && depositStep !== 2 && (
+            <div className="deposit-mode-toggle" style={{ marginBottom: '15px', padding: '10px', background: '#1a1a2e', borderRadius: '8px' }}>
+              <label style={{ marginRight: '10px' }}>Deposit Mode:</label>
+              <button 
+                onClick={() => setDepositMode('single')}
+                style={{ 
+                  padding: '8px 16px', 
+                  marginRight: '8px',
+                  background: depositMode === 'single' ? '#4a9eff' : '#333',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: 'white',
+                  cursor: 'pointer'
+                }}
+              >
+                🔒 Single-Step (Secure)
+              </button>
+              <button 
+                onClick={() => setDepositMode('two-step')}
+                style={{ 
+                  padding: '8px 16px',
+                  background: depositMode === 'two-step' ? '#ff6b6b' : '#333',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: 'white',
+                  cursor: 'pointer'
+                }}
+              >
+                🧪 Two-Step (Experimental)
+              </button>
+              <p style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                {depositMode === 'single' 
+                  ? '✅ Recommended: No front-running risk. Deposit is linkable, withdrawal is private.'
+                  : '⚠️ Experimental: Attempts deposit anonymity but can be front-run. Use for demo only.'}
+              </p>
+            </div>
+          )}
           
           <div className="input-group">
             <label>Amount (STRK wei):</label>
@@ -860,12 +1102,13 @@ function App() {
               type="text" 
               value={amount} 
               onChange={(e) => { setAmount(e.target.value); setShares(e.target.value); }}
-              disabled={proofState.state !== ProofState.Initial || intentMarked}
+              disabled={proofState.state !== ProofState.Initial || depositStep === 2 || intentMarked}
               placeholder="1000000000000000000 = 1 STRK"
             />
           </div>
           
-          {intentMarked && (
+          {/* Show secret/blinding for single-step OR after intent marked for two-step */}
+          {!withdrawMode && depositStep !== 2 && (depositMode === 'single' || intentMarked) && (
             <>
               <div className="input-group">
                 <label>Secret:</label>
@@ -876,7 +1119,7 @@ function App() {
                   disabled={proofState.state !== ProofState.Initial}
                 />
                 <button onClick={generateRandomValues} disabled={proofState.state !== ProofState.Initial}>
-                  Generate New
+                  Generate Random
                 </button>
               </div>
               <div className="input-group">
@@ -894,34 +1137,37 @@ function App() {
                   type="text" 
                   value={commitment} 
                   onChange={(e) => setCommitment(e.target.value)} 
-                  placeholder="Enter commitment hash"
+                  placeholder="Click Compute after generating secret/blinding"
+                  readOnly
                 />
                 <button onClick={computeCommitment} disabled={!secret || !blinding}>
                   Compute
                 </button>
               </div>
-              
-              {/* Note Management */}
-              <div className="note-section">
-                <h4>⚠️ Save Your Note (Required for Withdrawal)</h4>
-                <div className="note-buttons">
-                  <button onClick={copyNote} className="note-button">
-                    📋 Copy Note
-                  </button>
-                  <button onClick={downloadNote} className="note-button">
-                    💾 Download Note
-                  </button>
-                </div>
-                <div className="input-group">
-                  <label>Paste Note:</label>
-                  <input 
-                    type="text" 
-                    placeholder="sparrow:amount:secret:blinding:time:shares"
-                    onChange={(e) => parseNote(e.target.value)}
-                  />
-                </div>
-              </div>
             </>
+          )}
+          
+          {/* Note Management - show after commitment is computed */}
+          {commitment && (
+            <div className="note-section">
+              <h4>⚠️ Save Your Note (Required for Withdrawal)</h4>
+              <div className="note-buttons">
+                <button onClick={copyNote} className="note-button">
+                  📋 Copy Note
+                </button>
+                <button onClick={downloadNote} className="note-button">
+                  💾 Download Note
+                </button>
+              </div>
+              <div className="input-group">
+                <label>Paste Note:</label>
+                <input 
+                  type="text" 
+                  placeholder="sparrow:amount:secret:blinding:time:shares"
+                  onChange={(e) => parseNote(e.target.value)}
+                />
+              </div>
+            </div>
           )}
         </div>
         
@@ -950,11 +1196,12 @@ function App() {
             <label>Your Saved Note:</label>
             <input 
               type="text" 
-              placeholder="sparrow:shares:secret:blinding:deposit_time"
+              placeholder="sparrow:amount:secret:blinding:time:shares:commitment"
               onChange={(e) => {
                 const parts = e.target.value.split(':');
-                if (parts.length >= 5 && parts[0] === 'sparrow') {
-                  setWithdrawShares(parts[1]);
+                // Format: sparrow:amount:secret:blinding:time:shares:commitment
+                if (parts.length >= 6 && parts[0] === 'sparrow') {
+                  setWithdrawShares(parts[5]);  // shares is at position 5
                   setWithdrawSecret(parts[2]);
                   setWithdrawBlinding(parts[3]);
                   setDepositTime(parts[4]);
@@ -963,17 +1210,10 @@ function App() {
             />
           </div>
           
-          <div className="input-group">
-            <label>Note Index (from Merkle tree):</label>
-            <input 
-              type="number" 
-              value={withdrawNoteIndex}
-              onChange={(e) => setWithdrawNoteIndex(e.target.value)}
-            />
-          </div>
+          {/* Note: leaf_index is fetched automatically from the indexer */}
           
           <div className="input-group">
-            <label>Recipient Address:</label>
+            <label>Recipient Address (use fresh wallet for privacy!):</label>
             <input 
               type="text" 
               value={withdrawRecipient || walletAddress}
@@ -1004,17 +1244,39 @@ function App() {
         )}
         
         {/* Deposit Flow Buttons */}
-        {!withdrawMode && (
+        {!withdrawMode && proofState.state === ProofState.Initial && depositStep !== 2 && (
           <>
-            {proofState.state === ProofState.Initial && !intentMarked && (
-              <button className="primary-button" onClick={markDepositIntent} disabled={!wallet}>
-                Step 1: Deposit STRK
+            {/* Single-step deposit */}
+            {depositMode === 'single' && (
+              <button 
+                className="primary-button" 
+                onClick={privateDeposit} 
+                disabled={!wallet || !commitment}
+              >
+                🔒 Private Deposit (Single-Step)
               </button>
             )}
             
-            {proofState.state === ProofState.Initial && intentMarked && depositStep === 1 && (
-              <button className="primary-button" onClick={createPrivateCommitment}>
-                Step 2: Create Commitment
+            {/* Two-step deposit */}
+            {depositMode === 'two-step' && !intentMarked && (
+              <button 
+                className="primary-button" 
+                onClick={markDepositIntent} 
+                disabled={!wallet}
+                style={{ background: '#ff6b6b' }}
+              >
+                Step 1: Mark Deposit Intent
+              </button>
+            )}
+            
+            {depositMode === 'two-step' && intentMarked && (
+              <button 
+                className="primary-button" 
+                onClick={createPrivateCommitment}
+                disabled={!commitment}
+                style={{ background: '#ff6b6b' }}
+              >
+                Step 2: Create Private Commitment
               </button>
             )}
           </>
